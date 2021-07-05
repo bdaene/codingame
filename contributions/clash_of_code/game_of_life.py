@@ -1,6 +1,12 @@
 
+from random import choices
+
 height, width = map(int, input().split())
 board = [input() for _ in range(height)]
+
+# board = [choices('O ', k=width) for _ in range(height)]
+print('\n'.join(''.join(row) for row in board))
+print()
 
 
 def next_state(row, col):
@@ -13,10 +19,10 @@ def next_state(row, col):
                 continue
             if board[row+r][col+c] == 'O':
                 alive_neighbors_count += 1
-    if board[row][col] == ' ' and alive_neighbors_count == 3:
+    if board[row][col] == '.' and alive_neighbors_count == 3:
         return 'O'
     elif board[row][col] == 'O' and (alive_neighbors_count < 2 or alive_neighbors_count > 3):
-        return ' '
+        return '.'
     else:
         return board[row][col]
 
