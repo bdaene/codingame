@@ -1,4 +1,3 @@
-
 # https://www.codingame.com/ide/puzzle/sudoku-solver
 
 import sys
@@ -22,40 +21,36 @@ def solve(sudoku):
     debug(columns_values)
     debug(squares_values)
 
-    empty_cells = [(row, col) for row in range(9) for col in range(9) if sudoku[row][col] == EMPTY_VALUE]
-    empty_cells.sort(key=lambda cell: len(
-        rows_values[cell[0]] & columns_values[cell[1]] & squares_values[cell[0] // 3 * 3 + cell[1] // 3]), reverse=True)
+    empty_cells = set((row, col) for row in range(9) for col in range(9) if sudoku[row][col] == EMPTY_VALUE)
 
     debug(empty_cells)
 
-    index = len(empty_cells) - 1
-    cell_values = {}
-    while 0 <= index < len(empty_cells):
-        cell = empty_cells[index]
+    def fill():
+        if not empty_cells:
+            yield sudoku
+            return
+
+        cell = min(empty_cells, key=lambda c: len(rows_values[c[0]] & columns_values[c[1]] & squares_values[c[0]//3*3+c[1]//3]))
+        empty_cells.remove(cell)
+
         row, col = cell
-        square = row // 3 * 3 + col // 3
-        if cell not in cell_values:
-            cell_values[cell] = rows_values[row] & columns_values[col] & squares_values[square]
-        values = cell_values[cell]
-        value = sudoku[row][col]
-        if value != EMPTY_VALUE:
-            rows_values[row].add(value)
-            columns_values[col].add(value)
-            squares_values[square].add(value)
-        if not values:
-            sudoku[row][col] = EMPTY_VALUE
-            del cell_values[cell]
-            index += 1
-        else:
-            value = values.pop()
+        square = row//3*3+col//3
+        values = rows_values[row] & columns_values[col] & squares_values[square]
+
+        for value in values:
             sudoku[row][col] = value
             rows_values[row].remove(value)
             columns_values[col].remove(value)
             squares_values[square].remove(value)
-            index -= 1
+            yield from fill()
+            sudoku[row][col] = EMPTY_VALUE
+            rows_values[row].add(value)
+            columns_values[col].add(value)
+            squares_values[square].add(value)
 
-    if index < 0:
-        return sudoku
+        empty_cells.add(cell)
+
+    return next(fill())
 
 
 def main():
