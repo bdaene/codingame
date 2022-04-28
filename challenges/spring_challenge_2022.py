@@ -149,7 +149,7 @@ def dist(a, b):
     return abs(b.position - a.position)
 
 
-def get_hero_actions(my_base: Base, opponent_base: Base,
+def get_hero_actions(turn: int, my_base: Base, opponent_base: Base,
                      my_heroes: Iterable[Entity], opponent_heroes: Iterable[Entity], monsters: Iterable[Entity]):
     threats = filter(lambda monster_: monster_.threat_for is BaseType.MY_BASE, monsters)
     threats = sorted(threats, key=partial(dist, my_base))
@@ -159,15 +159,21 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
     heroes_messages = {}
     used_mana = 0
 
-    # Protect attacked heroes
+    # Protect heroes
     for hero in my_heroes:
-        closest_hero = min(set(my_heroes) - {hero}, key=lambda hero_: abs(hero_.position - hero.position))
-        if (hero.is_controlled
-                and used_mana + SPELL_COST < my_base.mana
-                and dist(hero, closest_hero) < SHIELD_RANGE):
-            heroes_actions[closest_hero] = ActionSpell(Spell.SHIELD, list(my_heroes)[0])
-            heroes_messages[closest_hero] = f"S"
-            available_heroes.remove(closest_hero)
+        if not opponent_heroes:
+            break
+        closest_opponent = min(opponent_heroes, key=partial(dist, hero))
+        closest_ally = min(set(available_heroes) - {hero}, key=partial(dist, hero), default=None)
+        if closest_ally is None:
+            continue
+        if (dist(closest_opponent, hero) < CONTROL_RANGE
+                and dist(closest_ally, hero) < SHIELD_RANGE
+                and hero.shield_life <= 0
+                and used_mana + SPELL_COST < my_base.mana):
+            heroes_actions[closest_ally] = ActionSpell(Spell.SHIELD, hero)
+            heroes_messages[closest_ally] = f"S"
+            available_heroes.remove(closest_ally)
 
     # Target closest threats
     for threat in threats:
@@ -178,9 +184,11 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
 
         # try control it toward enemy base
         if (BASE_RADIUS < dist(threat, my_base)
+                and threat.health > 20
                 and dist(closest_hero, threat) < CONTROL_RANGE
                 and dist(threat, opponent_base) < dist(closest_hero, opponent_base)
-                and used_mana + SPELL_COST < my_base.mana):
+                and used_mana + SPELL_COST < my_base.mana
+                and threat.shield_life <= 0):
             heroes_actions[closest_hero] = ActionSpell(Spell.CONTROL, entity=threat, position=opponent_base.position)
             heroes_messages[closest_hero] = f"C{threat.id_}"
             available_heroes.remove(closest_hero)
@@ -190,7 +198,8 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
         # try push it outside if inside
         if (BASE_RADIUS - WIND_PUSH < dist(threat, my_base) < BASE_RADIUS
                 and dist(closest_hero, threat) < WIND_RANGE
-                and used_mana + SPELL_COST < my_base.mana):
+                and used_mana + SPELL_COST < my_base.mana
+                and threat.shield_life <= 0):
             heroes_actions[closest_hero] = ActionSpell(Spell.WIND, position=threat.position * 2 - my_base.position)
             heroes_messages[closest_hero] = f"W{threat.id_}"
             available_heroes.remove(closest_hero)
@@ -242,7 +251,9 @@ def main():
     log(heroes_per_player)
 
     # game loop
+    turn = 0
     while True:
+        turn += 1
         my_base.health, my_base.mana = map(int, input().split())
         opponent_base.health, opponent_base.mana = map(int, input().split())
 
@@ -250,8 +261,9 @@ def main():
         entities_by_type = defaultdict(set)
         for entity in entities:
             entities_by_type[entity.type_].add(entity)
+        log(entities_by_type)
 
-        for action, message in get_hero_actions(my_base, opponent_base, entities_by_type[EntityType.MY_HERO],
+        for action, message in get_hero_actions(turn, my_base, opponent_base, entities_by_type[EntityType.MY_HERO],
                                                 entities_by_type[EntityType.OPPONENT_HERO],
                                                 entities_by_type[EntityType.MONSTER]):
             print(action, message)
