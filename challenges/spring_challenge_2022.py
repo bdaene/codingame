@@ -159,6 +159,16 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
     heroes_messages = {}
     used_mana = 0
 
+    # Protect attacked heroes
+    for hero in my_heroes:
+        closest_hero = min(set(my_heroes) - {hero}, key=lambda hero_: abs(hero_.position - hero.position))
+        if (hero.is_controlled
+                and used_mana + SPELL_COST < my_base.mana
+                and dist(hero, closest_hero) < SHIELD_RANGE):
+            heroes_actions[closest_hero] = ActionSpell(Spell.SHIELD, list(my_heroes)[0])
+            heroes_messages[closest_hero] = f"S"
+            available_heroes.remove(closest_hero)
+
     # Target closest threats
     for threat in threats:
         if not available_heroes:
