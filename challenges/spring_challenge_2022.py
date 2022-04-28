@@ -142,6 +142,7 @@ SHIELD_RANGE = 2200
 CONTROL_RANGE = 2200
 SPELL_COST = 10
 BASE_VIEW = 6000
+HERO_VIEW = 2200
 
 
 def dist(a, b):
@@ -186,6 +187,7 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
             used_mana += SPELL_COST
             continue
 
+        # Attack
         damage_done = 0
         while available_heroes and damage_done < threat.health:
             closest_hero = min(available_heroes, key=partial(dist, threat))
@@ -199,7 +201,7 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
     # Gain mana
     close_monsters = sorted(monsters, key=partial(dist, my_base))
     for monster in close_monsters:
-        if not available_heroes or dist(my_base, monster) > 1.5 * BASE_RADIUS:
+        if not available_heroes or dist(my_base, monster) > 2 * BASE_RADIUS:
             break
         closest_hero = min(available_heroes, key=partial(dist, monster))
         heroes_actions[closest_hero] = ActionMove(monster.position)
@@ -209,7 +211,14 @@ def get_hero_actions(my_base: Base, opponent_base: Base,
     # Move in defense position
     for hero in available_heroes:
         relative_position = hero.position - my_base.position
-        heroes_actions[hero] = ActionMove(my_base.position + relative_position * (BASE_VIEW / abs(relative_position)))
+        target_position = my_base.position + relative_position * ((BASE_RADIUS + HERO_VIEW) / abs(relative_position))
+        closest_hero = min(set(my_heroes) - {hero}, key=lambda hero_: abs(hero_.position - target_position))
+        if abs(target_position - closest_hero.position) < HERO_VIEW:
+            relative_position = target_position - closest_hero.position
+            target_position = closest_hero.position + relative_position * (HERO_VIEW / abs(relative_position))
+
+        heroes_actions[hero] = ActionMove(
+            my_base.position + relative_position * ((BASE_RADIUS + HERO_VIEW) / abs(relative_position)))
         heroes_messages[hero] = "D"
 
     return tuple((heroes_actions.get(hero, ActionWait()), heroes_messages.get(hero, ""))
