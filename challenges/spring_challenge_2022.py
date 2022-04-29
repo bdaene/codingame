@@ -4,8 +4,8 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Iterable
 from functools import partial
+from typing import Optional, Union
 
 
 class EntityType(Enum):
@@ -78,6 +78,9 @@ class Entity:
             is_controlled=is_controlled == '1'
         )
 
+    def is_shielded(self):
+        return self.shield_life > 0
+
 
 @dataclass
 class Base:
@@ -126,6 +129,10 @@ class ActionSpell:
         return " ".join(parameters)
 
 
+def can_cast(caster: Entity, spell_range: int, target: Entity):
+    return not target.is_shielded() and dist(caster, target) <= spell_range
+
+
 def log(*args):
     print(*args, file=sys.stderr, flush=True)
 
@@ -143,110 +150,213 @@ CONTROL_RANGE = 2200
 SPELL_COST = 10
 BASE_VIEW = 6000
 HERO_VIEW = 2200
+TURN_LIMIT = 220
+MAP_SIZE = Point(17630, 9000)
 
 
 def dist(a, b):
     return abs(b.position - a.position)
 
 
-def get_hero_actions(turn: int, my_base: Base, opponent_base: Base,
-                     my_heroes: Iterable[Entity], opponent_heroes: Iterable[Entity], monsters: Iterable[Entity]):
-    threats = filter(lambda monster_: monster_.threat_for is BaseType.MY_BASE, monsters)
-    threats = sorted(threats, key=partial(dist, my_base))
+def get_position(distance, target, direction):
+    relative_position = direction - target
+    relative_position *= distance / abs(relative_position)
+    return target + relative_position
 
-    available_heroes = set(my_heroes)
-    heroes_actions = {}
-    heroes_messages = {}
-    used_mana = 0
 
-    # Protect heroes
-    for hero in my_heroes:
-        if not opponent_heroes:
-            break
-        closest_opponent = min(opponent_heroes, key=partial(dist, hero))
-        closest_ally = min(set(available_heroes) - {hero}, key=partial(dist, hero), default=None)
-        if closest_ally is None:
+Action = Union[ActionMove, ActionWait, ActionSpell]
+
+
+@dataclass
+class State:
+    turn: int
+    my_base: Base
+    opponent_base: Base
+    my_heroes: frozenset[Entity]
+    opponent_heroes: frozenset[Entity]
+    monsters: frozenset[Entity]
+
+    available_heroes: set
+    actions: dict[Entity, tuple[Action, str]]
+    used_mana: int
+
+    def __init__(self, turn, my_base, opponent_base, entities):
+        self.turn = turn
+        self.my_base = my_base
+        self.opponent_base = opponent_base
+
+        entities_by_type = defaultdict(set)
+        for entity in entities:
+            entities_by_type[entity.type_].add(entity)
+        self.my_heroes = frozenset(entities_by_type[EntityType.MY_HERO])
+        self.opponent_heroes = frozenset(entities_by_type[EntityType.OPPONENT_HERO])
+        self.monsters = frozenset(entities_by_type[EntityType.MONSTER])
+
+        self.available_heroes = set(self.my_heroes)
+        self.actions = {}
+        self.used_mana = 0
+
+    def add_action(self, hero, action, message):
+        if isinstance(action, ActionSpell):
+            if self.is_enough_mana():
+                self.used_mana += SPELL_COST
+            else:
+                return False
+
+        self.actions[hero] = (action, message)
+        self.available_heroes.discard(hero)
+        return True
+
+    def is_enough_mana(self, cost=SPELL_COST):
+        return self.used_mana + cost <= self.my_base.mana
+
+    def get_closest_hero(self, target: Union[Base, Entity]):
+        return min(self.available_heroes, key=partial(dist, target), default=None)
+
+    def get_actions(self):
+        default_action = ActionWait(), ""
+        return tuple(self.actions.get(hero, default_action)
+                     for hero in sorted(self.my_heroes, key=lambda hero_: hero_.id_))
+
+
+def protect_heroes(state: State):
+    for hero in state.my_heroes:
+        closest_opponent = min(state.opponent_heroes, key=partial(dist, hero), default=None)
+        closest_ally = min(state.available_heroes - {hero}, key=partial(dist, hero), default=None)
+        if closest_opponent is None or closest_ally is None:
             continue
-        if (dist(closest_opponent, hero) < CONTROL_RANGE
+        if (
+                dist(closest_opponent, hero) < CONTROL_RANGE
                 and dist(closest_ally, hero) < SHIELD_RANGE
-                and hero.shield_life <= 0
-                and used_mana + SPELL_COST < my_base.mana):
-            heroes_actions[closest_ally] = ActionSpell(Spell.SHIELD, hero)
-            heroes_messages[closest_ally] = f"S"
-            available_heroes.remove(closest_ally)
+                and not hero.is_shielded()
+        ):
+            state.add_action(closest_ally, ActionSpell(Spell.SHIELD, hero), "S")
 
-    # Target closest threats
+
+def control_threat(state: State, threat: Entity):
+    closest_hero = state.get_closest_hero(threat)
+    return (
+            closest_hero is not None
+            and BASE_RADIUS < dist(threat, state.my_base)
+            and threat.health > 20
+            and can_cast(closest_hero, CONTROL_RANGE, threat)
+            and dist(threat, state.opponent_base) < dist(closest_hero, state.opponent_base)
+            and state.add_action(closest_hero,
+                                 ActionSpell(Spell.CONTROL, entity=threat, position=state.opponent_base.position),
+                                 f"C{threat.id_}")
+    )
+
+
+def push_threat(state, threat: Entity):
+    closest_hero = state.get_closest_hero(threat)
+    return (
+            closest_hero is not None
+            and BASE_RADIUS - WIND_PUSH < dist(threat, state.my_base) < BASE_RADIUS
+            and can_cast(closest_hero, WIND_RANGE, threat)
+            and state.add_action(closest_hero,
+                                 ActionSpell(Spell.WIND, position=threat.position * 2 - state.my_base.position),
+                                 f"W{threat.id_}")
+    )
+
+
+def attack_threat(state: State, threat: Entity):
+    damage_done = 0
+    while damage_done < threat.health:
+        closest_hero = state.get_closest_hero(threat)
+        if closest_hero is None:
+            return
+        state.add_action(closest_hero, ActionMove(threat.position), f"A{threat.id_}")
+
+        turns_to_base = max(0, dist(state.my_base, threat) - MONSTER_RANGE) // MONSTER_SPEED
+        turns_to_threat = max(0, dist(threat, closest_hero) - HERO_RANGE) // (HERO_SPEED - MONSTER_SPEED)
+        damage_done += HERO_DAMAGE * max(0, turns_to_base - turns_to_threat)
+
+
+def target_threats(state: State):
+    threats = filter(lambda monster_: monster_.threat_for is BaseType.MY_BASE, state.monsters)
+    threats = sorted(threats, key=partial(dist, state.my_base))
     for threat in threats:
-        if not available_heroes:
-            break
+        (
+                control_threat(state, threat)
+                or push_threat(state, threat)
+                or attack_threat(state, threat)
+        )
 
-        closest_hero = min(available_heroes, key=partial(dist, threat))
 
-        # try control it toward enemy base
-        if (BASE_RADIUS < dist(threat, my_base)
-                and threat.health > 20
-                and dist(closest_hero, threat) < CONTROL_RANGE
-                and dist(threat, opponent_base) < dist(closest_hero, opponent_base)
-                and used_mana + SPELL_COST < my_base.mana
-                and threat.shield_life <= 0):
-            heroes_actions[closest_hero] = ActionSpell(Spell.CONTROL, entity=threat, position=opponent_base.position)
-            heroes_messages[closest_hero] = f"C{threat.id_}"
-            available_heroes.remove(closest_hero)
-            used_mana += SPELL_COST
-            continue
+def gain_mana(state: State):
+    monsters = sorted(state.monsters, key=partial(dist, state.my_base))
+    for monster in monsters:
+        if dist(state.my_base, monster) > 2 * BASE_RADIUS:
+            return
+        closest_hero = state.get_closest_hero(monster)
+        if closest_hero is None:
+            return
+        state.add_action(closest_hero, ActionMove(monster.position), f"M{monster.id_}")
 
-        # try push it outside if inside
-        if (BASE_RADIUS - WIND_PUSH < dist(threat, my_base) < BASE_RADIUS
-                and dist(closest_hero, threat) < WIND_RANGE
-                and used_mana + SPELL_COST < my_base.mana
-                and threat.shield_life <= 0):
-            heroes_actions[closest_hero] = ActionSpell(Spell.WIND, position=threat.position * 2 - my_base.position)
-            heroes_messages[closest_hero] = f"W{threat.id_}"
-            available_heroes.remove(closest_hero)
-            used_mana += SPELL_COST
-            continue
 
-        # Attack
-        damage_done = 0
-        while available_heroes and damage_done < threat.health:
-            closest_hero = min(available_heroes, key=partial(dist, threat))
-            heroes_actions[closest_hero] = ActionMove(threat.position)
-            heroes_messages[closest_hero] = f"A{threat.id_}"
-            available_heroes.remove(closest_hero)
-            turns_to_base = max(0, dist(my_base, threat) - MONSTER_RANGE) // MONSTER_SPEED
-            turns_to_threat = max(0, dist(threat, closest_hero) - HERO_RANGE) // (HERO_SPEED - MONSTER_SPEED)
-            damage_done += HERO_DAMAGE * max(0, turns_to_base - turns_to_threat)
-
-    # Gain mana
-    close_monsters = sorted(monsters, key=partial(dist, my_base))
-    for monster in close_monsters:
-        if not available_heroes or dist(my_base, monster) > 2 * BASE_RADIUS:
-            break
-        closest_hero = min(available_heroes, key=partial(dist, monster))
-        heroes_actions[closest_hero] = ActionMove(monster.position)
-        heroes_messages[closest_hero] = f"M{monster.id_}"
-        available_heroes.remove(closest_hero)
-
-    # Move in defense position
-    for hero in available_heroes:
-        relative_position = hero.position - my_base.position
-        target_position = my_base.position + relative_position * ((BASE_RADIUS + HERO_VIEW) / abs(relative_position))
-        closest_hero = min(set(my_heroes) - {hero}, key=lambda hero_: abs(hero_.position - target_position))
+def move_to_defense(state: State):
+    for hero in set(state.available_heroes):
+        target_position = get_position(BASE_RADIUS + HERO_VIEW, state.my_base.position, hero.position)
+        closest_hero = min(set(state.my_heroes) - {hero}, key=lambda hero_: abs(hero_.position - target_position))
         if abs(target_position - closest_hero.position) < HERO_VIEW:
-            relative_position = target_position - closest_hero.position
-            target_position = closest_hero.position + relative_position * (HERO_VIEW / abs(relative_position))
+            target_position = get_position(HERO_VIEW, closest_hero.position, target_position)
+        state.add_action(hero, ActionMove(target_position), "D")
 
-        heroes_actions[hero] = ActionMove(
-            my_base.position + relative_position * ((BASE_RADIUS + HERO_VIEW) / abs(relative_position)))
-        heroes_messages[hero] = "D"
 
-    return tuple((heroes_actions.get(hero, ActionWait()), heroes_messages.get(hero, ""))
-                 for hero in sorted(my_heroes, key=lambda hero_: hero_.id_))
+def move_to_attack(state: State, hero: Entity):
+    if dist(hero, state.opponent_base) > BASE_RADIUS:
+        center = (state.my_base.position + state.opponent_base.position) * .5
+        target_position = get_position(BASE_RADIUS, state.opponent_base.position, center)
+        state.add_action(hero, ActionMove(target_position), f"M")
+        return True
+    return False
+
+
+def push_attack(state: State, hero: Entity):
+    monsters_in_range = {monster for monster in state.monsters if can_cast(hero, WIND_RANGE, monster)}
+    return (
+            len(monsters_in_range) >= 5
+            and state.add_action(hero, ActionSpell(Spell.WIND, position=state.opponent_base.position), "P")
+    )
+
+
+def control_attack(state: State, hero: Entity):
+    closest_monster = min((monster for monster in state.monsters if can_cast(hero, CONTROL_RANGE, monster)),
+                          key=partial(dist, hero), default=None)
+    return (
+            closest_monster
+            and state.add_action(hero, ActionSpell(Spell.CONTROL, entity=closest_monster,
+                                                   position=state.opponent_base.position), f"C{closest_monster.id_}")
+    )
+
+
+def attack_opponent(state: State):
+    hero = state.get_closest_hero(state.opponent_base)
+    if hero is None:
+        return
+    (
+            push_attack(state, hero)
+            or control_attack(state, hero)
+            or move_to_attack(state, hero)
+    )
+
+
+def get_actions(state: State):
+    protect_heroes(state)
+
+    if state.turn > TURN_LIMIT // 2:
+        attack_opponent(state)
+
+    target_threats(state)
+    gain_mana(state)
+    move_to_defense(state)
+
+    return state.get_actions()
 
 
 def main():
     my_base = Base(BaseType.MY_BASE, Point(*(map(int, input().split()))))
-    opponent_base = Base(BaseType.OPPONENT_BASE, Point(17630, 9000) - my_base.position)
+    opponent_base = Base(BaseType.OPPONENT_BASE, MAP_SIZE - my_base.position)
     heroes_per_player = int(input())
     log(heroes_per_player)
 
@@ -256,16 +366,11 @@ def main():
         turn += 1
         my_base.health, my_base.mana = map(int, input().split())
         opponent_base.health, opponent_base.mana = map(int, input().split())
-
         entities = [Entity.from_string(input()) for _ in range(int(input()))]
-        entities_by_type = defaultdict(set)
-        for entity in entities:
-            entities_by_type[entity.type_].add(entity)
-        log(entities_by_type)
 
-        for action, message in get_hero_actions(turn, my_base, opponent_base, entities_by_type[EntityType.MY_HERO],
-                                                entities_by_type[EntityType.OPPONENT_HERO],
-                                                entities_by_type[EntityType.MONSTER]):
+        state = State(turn, my_base, opponent_base, entities)
+
+        for action, message in get_actions(state):
             print(action, message)
 
 
