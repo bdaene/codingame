@@ -60,8 +60,11 @@ class State:
             actions += '.'
             yield actions
 
+    def __lt__(self, other: State):
+        return (self.cost(), self.instructions) < (other.cost(), other.instructions)
 
-STATES = 1
+
+STATES = 20
 
 
 def main():
@@ -69,11 +72,13 @@ def main():
     states = [State()]
     for letter in magic_phrase:
         letter = ALPHABET.index(letter)
-        new_states = set()
+        new_states = []
         for state in states:
+            previous_cost = state.cost()
             for actions in state.gen_actions(letter):
-                new_states.add(state.do_actions(actions))
-        states = sorted(new_states, key=State.cost)[:STATES]
+                new_states.append((previous_cost + len(actions), actions, state))
+
+        states = set(state.do_actions(actions) for _, actions, state in sorted(new_states)[:STATES])
 
     best_state = min(states, key=State.cost)
     print(best_state.instructions)
