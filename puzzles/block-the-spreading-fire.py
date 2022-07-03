@@ -1,6 +1,6 @@
 #  See https://www.codingame.com/ide/puzzle/block-the-spreading-fire
 import sys
-from heapq import heappush, heappop
+from heapq import heappush, heappop, heapify
 from random import randrange
 from time import perf_counter
 from typing import NamedTuple
@@ -26,9 +26,10 @@ class Plan(NamedTuple):
 
 
 FireProgress = tuple[int, ...]
+TurnsBeforeFire = dict[Position, int]
 
 
-def get_turns_before_fire(plan: Plan, fire_start: Position):
+def get_turns_before_fire(plan: Plan, fire_start: Position) -> TurnsBeforeFire:
     turns_before_fire = {}
     heap = [(0, fire_start)]
     while heap:
@@ -46,7 +47,7 @@ def get_turns_before_fire(plan: Plan, fire_start: Position):
     return turns_before_fire
 
 
-def get_circle(plan: Plan, center: Position, radius: int):
+def get_circle(plan: Plan, center: Position, radius: int) -> tuple[set[Position], set[Position]]:
     circled_cells, border = {center}, {center}
     for _ in range(radius):
         border_ = set()
@@ -60,20 +61,46 @@ def get_circle(plan: Plan, center: Position, radius: int):
     return border, circled_cells
 
 
-def is_valid(plan: Plan, border: list[Position], turns_before_fire: dict[Position, int]):
+def is_valid(plan: Plan, border_cells: list[Position], turns_before_fire: dict[Position, int]) -> bool:
     turn = 0
-    for position in border:
+    for position in border_cells:
         if turns_before_fire[position] <= turn:
             return False
         turn += plan.cells[position].cut_duration
     return True
 
 
+def improve_solution(plan: Plan, turns_before_fire: TurnsBeforeFire,
+                     border_cells: list[Position], saved_cells: set[Position]) -> tuple[list[Position], set[Position]]:
+    unsorted_border = set(border_cells)
+    cells_to_visit = [(-plan.cells[cell].value, cell) for cell in border_cells]
+    heapify(cells_to_visit)
+    while cells_to_visit:
+        _, position = heappop(cells_to_visit)
+        x, y = position
+        neighbors = set()
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            neighbor_position = (x + dx, y + dy)
+            if (plan.cells.get(neighbor_position) is not None
+                    and neighbor_position not in saved_cells
+                    and neighbor_position not in unsorted_border):
+                neighbors.add(neighbor_position)
+        new_border = unsorted_border - {position} | neighbors
+        if is_valid(plan, sorted(new_border, key=turns_before_fire.__getitem__), turns_before_fire):
+            unsorted_border = new_border
+            saved_cells.add(position)
+            for neighbor in neighbors:
+                heappush(cells_to_visit, (-plan.cells[neighbor].value, neighbor))
+
+    border_cells = sorted(unsorted_border, key=turns_before_fire.__getitem__)
+    return border_cells, saved_cells
+
+
 def show_grid(width, height, grid, spaces=1):
     log('\n'.join(''.join(f"{grid.get((x, y), '#'):>{spaces}}" for x in range(width)) for y in range(height)))
 
 
-def solve(plan: Plan, fire_start: Position):
+def solve(plan: Plan, fire_start: Position) -> list[Position]:
     timer_start = perf_counter()
 
     total_value = sum(cell.value for cell in plan.cells.values() if cell is not None)
@@ -94,20 +121,20 @@ def solve(plan: Plan, fire_start: Position):
             continue
         tested.add(key)
 
-        border, circled_cells = get_circle(plan, center, radius)
-        border = sorted(border, key=lambda position: turns_before_fire[position])
-        if not is_valid(plan, border, turns_before_fire):
+        border_cells, circled_cells = get_circle(plan, center, radius)
+        border_cells = sorted(border_cells, key=turns_before_fire.__getitem__)
+        if not is_valid(plan, border_cells, turns_before_fire):
             continue
         valid += 1
-
-        circle_value = sum(plan.cells[position].value for position in circled_cells)
         if fire_start in circled_cells:
-            value = total_value - circle_value
+            saved_cells = plan.cells.keys() - circled_cells
         else:
-            border_value = sum(plan.cells[position].value for position in border)
-            value = circle_value - border_value
+            saved_cells = circled_cells - set(border_cells)
+        border_cells, saved_cells = improve_solution(plan, turns_before_fire, border_cells, saved_cells)
+
+        value = sum(plan.cells[position].value for position in saved_cells)
         if value > best_value:
-            best_value, best_cut = value, border
+            best_value, best_cut = value, border_cells
     log(f"Tests: {valid}/{len(tested)}/{total}")
     log(f"Value: {best_value}/{total_value}")
 
