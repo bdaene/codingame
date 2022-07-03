@@ -1,6 +1,6 @@
 #  See https://www.codingame.com/ide/puzzle/block-the-spreading-fire
 import sys
-from heapq import heappush, heappop, heapify
+from heapq import heappush, heappop
 from random import randrange
 from time import perf_counter
 from typing import NamedTuple
@@ -23,15 +23,22 @@ class Plan(NamedTuple):
     width: int
     height: int
     cells: dict[Position, Cell]
+    fire_start: Position
+    turns_before_fire: dict[Position, int] = {}
 
 
 FireProgress = tuple[int, ...]
 TurnsBeforeFire = dict[Position, int]
+Cells = set[Position]
+SortedCells = list[Position]
+
+# Global and used everywhere
+plan: Plan
 
 
-def get_turns_before_fire(plan: Plan, fire_start: Position) -> TurnsBeforeFire:
-    turns_before_fire = {}
-    heap = [(0, fire_start)]
+def update_plan_turns_before_fire():
+    turns_before_fire = plan.turns_before_fire
+    heap = [(0, plan.fire_start)]
     while heap:
         time, position = heappop(heap)
         if position in turns_before_fire:
@@ -44,10 +51,8 @@ def get_turns_before_fire(plan: Plan, fire_start: Position) -> TurnsBeforeFire:
             if plan.cells.get(neighbor_position) is not None:
                 heappush(heap, (time, neighbor_position))
 
-    return turns_before_fire
 
-
-def get_circle(plan: Plan, center: Position, radius: int) -> tuple[set[Position], set[Position]]:
+def get_circle(center: Position, radius: int) -> tuple[Cells, Cells]:
     circled_cells, border = {center}, {center}
     for _ in range(radius):
         border_ = set()
@@ -61,56 +66,52 @@ def get_circle(plan: Plan, center: Position, radius: int) -> tuple[set[Position]
     return border, circled_cells
 
 
-def is_valid(plan: Plan, border_cells: list[Position], turns_before_fire: dict[Position, int]) -> bool:
+def is_valid(border_cells: Cells) -> bool:
     turn = 0
-    for position in border_cells:
-        if turns_before_fire[position] <= turn:
+    for position in sorted(border_cells, key=plan.turns_before_fire.__getitem__):
+        if plan.turns_before_fire[position] <= turn:
             return False
         turn += plan.cells[position].cut_duration
     return True
 
 
-def improve_solution(plan: Plan, turns_before_fire: TurnsBeforeFire,
-                     border_cells: list[Position], saved_cells: set[Position]) -> tuple[list[Position], set[Position]]:
-    unsorted_border = set(border_cells)
-    cells_to_visit = [(-plan.cells[cell].value, cell) for cell in border_cells]
-    heapify(cells_to_visit)
+def get_neighbors(cell: Position) -> Cells:
+    x, y = cell
+    neighbors = set()
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        neighbor_position = (x + dx, y + dy)
+        if neighbor_position in plan.cells:
+            neighbors.add(neighbor_position)
+    return neighbors
+
+
+def improve_solution(burned_cells: Cells, border_cells: Cells, saved_cells: Cells) -> tuple[Cells, Cells, Cells]:
+    cells_to_visit = border_cells.copy()
+
     while cells_to_visit:
-        _, position = heappop(cells_to_visit)
-        x, y = position
-        neighbors = set()
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            neighbor_position = (x + dx, y + dy)
-            if (plan.cells.get(neighbor_position) is not None
-                    and neighbor_position not in saved_cells
-                    and neighbor_position not in unsorted_border):
-                neighbors.add(neighbor_position)
-        new_border = unsorted_border - {position} | neighbors
-        if is_valid(plan, sorted(new_border, key=turns_before_fire.__getitem__), turns_before_fire):
-            unsorted_border = new_border
+        position = cells_to_visit.pop()
+        neighbors = get_neighbors(position)
+        new_safe_cells = neighbors & burned_cells
+        if not new_safe_cells:
+            border_cells.remove(position)
             saved_cells.add(position)
-            for neighbor in neighbors:
-                heappush(cells_to_visit, (-plan.cells[neighbor].value, neighbor))
+            continue
 
-    border_cells = sorted(unsorted_border, key=turns_before_fire.__getitem__)
-    return border_cells, saved_cells
+        new_border = (border_cells - {position}) | new_safe_cells
+        if is_valid(new_border):
+            border_cells = new_border
+            saved_cells.add(position)
+            burned_cells -= neighbors
+            cells_to_visit |= (neighbors & border_cells)
+
+    return burned_cells, border_cells, saved_cells
 
 
-def show_grid(width, height, grid, spaces=1):
-    log('\n'.join(''.join(f"{grid.get((x, y), '#'):>{spaces}}" for x in range(width)) for y in range(height)))
-
-
-def solve(plan: Plan, fire_start: Position) -> list[Position]:
-    timer_start = perf_counter()
-
-    total_value = sum(cell.value for cell in plan.cells.values() if cell is not None)
-    turns_before_fire = get_turns_before_fire(plan, fire_start)
-    # show_grid(plan.width, plan.height, turns_before_fire, 3)
-
-    best_cut = []
+def solve(time_limit: float) -> Cells:
+    best_border = set()
     best_value = 0
     tested, valid, total = set(), 0, 0
-    while perf_counter() < timer_start + 4.9:
+    while perf_counter() < time_limit:
         total += 1
         center = randrange(1, plan.width - 1), randrange(1, plan.height - 1)
         if center not in plan.cells:
@@ -121,27 +122,41 @@ def solve(plan: Plan, fire_start: Position) -> list[Position]:
             continue
         tested.add(key)
 
-        border_cells, circled_cells = get_circle(plan, center, radius)
-        border_cells = sorted(border_cells, key=turns_before_fire.__getitem__)
-        if not is_valid(plan, border_cells, turns_before_fire):
+        border_cells, circled_cells = get_circle(center, radius)
+        if not is_valid(border_cells):
             continue
         valid += 1
-        if fire_start in circled_cells:
-            saved_cells = plan.cells.keys() - circled_cells
+        inside_cells = circled_cells - border_cells
+        outside_cells = plan.cells.keys() - circled_cells
+        if plan.fire_start in inside_cells:
+            burned_cells, saved_cells = inside_cells, outside_cells
         else:
-            saved_cells = circled_cells - set(border_cells)
-        border_cells, saved_cells = improve_solution(plan, turns_before_fire, border_cells, saved_cells)
+            burned_cells, saved_cells = outside_cells, inside_cells
+        burned_cells, border_cells, saved_cells = improve_solution(burned_cells, border_cells, saved_cells)
 
         value = sum(plan.cells[position].value for position in saved_cells)
         if value > best_value:
-            best_value, best_cut = value, border_cells
+            best_value, best_border = value, border_cells
     log(f"Tests: {valid}/{len(tested)}/{total}")
-    log(f"Value: {best_value}/{total_value}")
+    log(f"Value: {best_value}")
 
-    return best_cut
+    return best_border
+
+
+def show_cells(cells):
+    unsafe_cells = plan.cells.keys() - cells
+    return '\n'.join(''.join(
+        '.' if (x, y) in unsafe_cells else '#'
+        for x in range(plan.width))
+        for y in range(plan.height)
+    )
 
 
 def main():
+    global plan
+
+    time_start = perf_counter()
+
     tree_cell = Cell(*map(int, input().split()))
     house_cell = Cell(*map(int, input().split()))
     log(f"Tree: {tree_cell}")
@@ -154,12 +169,14 @@ def main():
 
     width, height = map(int, input().split())
     fire_start_x, fire_start_y = map(int, input().split())
+    fire_start = (fire_start_x, fire_start_y)
     cells = {(x, y): cell
              for y in range(height) for x, cell in enumerate(map(cell_types.get, input()))
              if cell is not None}
-    plan = Plan(width, height, cells)
+    plan = Plan(width, height, cells, fire_start)
+    update_plan_turns_before_fire()
 
-    cuts = solve(plan, (fire_start_x, fire_start_y))[::-1]
+    cuts = sorted(solve(time_start + 4.9), key=plan.turns_before_fire.__getitem__, reverse=True)
 
     while 1:
         cooldown = int(input())
