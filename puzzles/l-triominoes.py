@@ -3,7 +3,7 @@
 import numpy
 
 
-def show_grid(grid):
+def print_grid(grid):
     w, h = grid.shape
     print('+' + '--+' * w)
     for y in range(h):
@@ -18,22 +18,28 @@ def show_grid(grid):
         print(line)
 
 
-def solve(grid, x, y):
-    to_visit = [(0, 0) + grid.shape + (x, y)]
+def solve(grid, n, x, y):
+    to_visit = [(n, 0, 0, x, y)]
     count = 0
     while to_visit:
-        m, n, o, p, x, y = to_visit.pop()
-        q, r = (m + o) // 2, (n + p) // 2
+        n, pos_x, pos_y, x, y = to_visit.pop()
+        n -= 1
+        mid_x, mid_y = pos_x + (1 << n), pos_y + (1 << n)
         count += 1
-        for m_, n_, o_, p_, q_, r_ in [(m, n, q, r, q - 1, r - 1), (q, n, o, r, q, r - 1), (q, r, o, p, q, r),
-                                       (m, r, q, p, q - 1, r)]:
-            if m_ <= x < o_ and n_ <= y < p_:
-                if o_-m_ > 1 and p_-n_ > 1:
-                    to_visit.append((m_, n_, o_, p_, x, y))
+        for pos_x, pos_y, corner_x, corner_y in [
+            (pos_x, pos_y, mid_x - 1, mid_y - 1),
+            (mid_x, pos_y, mid_x, mid_y - 1),
+            (mid_x, mid_y, mid_x, mid_y),
+            (pos_x, mid_y, mid_x - 1, mid_y),
+
+        ]:
+            if pos_x <= x < pos_x + (1 << n) and pos_y <= y < pos_y + (1 << n):
+                hole_x, hole_y = x, y
             else:
-                grid[q_][r_] = count
-                if o_-m_ > 1 and p_-n_ > 1:
-                    to_visit.append((m_, n_, o_, p_, q_, r_))
+                grid[corner_x][corner_y] = count
+                hole_x, hole_y = corner_x, corner_y
+            if n > 0:
+                to_visit.append((n, pos_x, pos_y, hole_x, hole_y))
 
 
 def main():
@@ -41,8 +47,8 @@ def main():
     x, y = map(int, input().split())
 
     grid = numpy.full((1 << n, 1 << n), 0, dtype=numpy.int8)
-    solve(grid, x, y)
-    show_grid(grid)
+    solve(grid, n, x, y)
+    print_grid(grid)
 
 
 if __name__ == "__main__":
